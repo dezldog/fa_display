@@ -365,10 +365,6 @@ class FlightAwareDisplay(Gtk.Application):
         header.set_margin_bottom(6)
         header.set_hexpand(True)
 
-        self.status_label = Gtk.Label(label='Starting...', xalign=0)
-        self.status_label.set_wrap(True)
-        self.status_label.set_margin_bottom(12)
-
         self.map_area = Gtk.DrawingArea()
         self.map_area.set_draw_func(self.on_map_draw)
         self.map_area.set_content_width(600)
@@ -422,6 +418,7 @@ class FlightAwareDisplay(Gtk.Application):
         self.size_groups = {col: Gtk.SizeGroup.new(Gtk.SizeGroupMode.HORIZONTAL) for col in self.columns}
         self.list_store = Gio.ListStore.new(AircraftRow)
         self.selection = Gtk.SingleSelection.new(self.list_store)
+        self.selection.connect('notify::selected-item', self.on_table_row_selected)
 
         factory = Gtk.SignalListItemFactory()
         factory.connect("setup", self.on_factory_setup)
@@ -507,7 +504,6 @@ class FlightAwareDisplay(Gtk.Application):
         main_box.set_margin_start(12)
         main_box.set_margin_end(12)
         main_box.append(header)
-        main_box.append(self.status_label)
 
         # Place the table below the map (vertical layout)
         content_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12)
@@ -727,7 +723,6 @@ class FlightAwareDisplay(Gtk.Application):
             self.aircraft = aircraft['aircraft']
             self.update_trails()
 
-        self.status_label.set_text(self.build_status_text())
         self.rebuild_aircraft_list()
         self.map_area.queue_draw()
         return False
@@ -1161,19 +1156,33 @@ class FlightAwareDisplay(Gtk.Application):
             heading = item.get('track') or item.get('heading') or 0
             if px < -20 or px > width + 20 or py < -20 or py > height + 20:
                 continue
-            self.draw_aircraft_icon(context, px, py, heading, item)
             hex_code = item.get('hex')
+            hex_code = str(hex_code).upper() if hex_code else None
+            if hex_code and hex_code == self.selected_hex:
+                context.save()
+                context.set_source_rgba(1.0, 0.85, 0.0, 0.9)
+                context.set_line_width(2.5)
+                context.arc(px, py, 16.0, 0, 2 * math.pi)
+                context.stroke()
+                context.restore()
+            self.draw_aircraft_icon(context, px, py, heading, item)
             if hex_code:
-                self.map_hit_targets.append((px, py, str(hex_code).upper()))
+                self.map_hit_targets.append((px, py, hex_code))
 
         self.draw_map_legend(context, width, height)
         self.draw_altitude_legend(context, width, height)
 
-        context.set_source_rgb(0, 0, 0)
+        status_text = self.build_status_text()
         context.select_font_face('Sans', 0, 0)
         context.set_font_size(12)
-        context.move_to(10, 20)
-        context.show_text(f'Receiver: {center_lat:.5f}, {center_lon:.5f}')
+        extents = context.text_extents(status_text)
+        pad = 4.0
+        context.set_source_rgba(1.0, 1.0, 1.0, 0.75)
+        context.rectangle(6, 8, extents.width + 2 * pad, extents.height + 2 * pad)
+        context.fill()
+        context.set_source_rgb(0.05, 0.05, 0.05)
+        context.move_to(6 + pad, 8 + pad + extents.height)
+        context.show_text(status_text)
 
     def on_map_click(self, gesture, n_press, x, y):
         hex_code = self.find_aircraft_at(x, y)
@@ -1191,6 +1200,14 @@ class FlightAwareDisplay(Gtk.Application):
                 best_dist = dist
                 best_hex = hex_code
         return best_hex
+
+    def on_table_row_selected(self, selection, param):
+        row = selection.get_selected_item()
+        hex_code = getattr(row, 'icao', None) if row else None
+        if hex_code == self.selected_hex:
+            return
+        self.selected_hex = hex_code
+        self.map_area.queue_draw()
 
     def apply_row_selection(self):
         if not self.selected_hex:
