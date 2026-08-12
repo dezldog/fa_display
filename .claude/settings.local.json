@@ -5,7 +5,11 @@
       "Bash(grep -n \"position_from_mlat\\\\|SpecialSquawks\" -A3 /tmp/planeObject.js | head -40; echo \"---config---\"; grep -n \"SpecialSquawks\" -A 20 /tmp/config.js)",
       "Read(//tmp/**)",
       "Bash(curl -s -m 5 http://flightaware.airwisp.net:8080/script.js -o /tmp/script.js)",
-      "Bash(python3 -m py_compile main.py aircraft_icons.py)"
+      "Bash(python3 -m py_compile main.py aircraft_icons.py)",
+      "Bash(curl -s --max-time 5 http://flightaware.airwisp.net:8080/data/receiver.json)",
+      "Bash(python3 -c \"import ast; ast.parse\\(open\\('main.py'\\).read\\(\\)\\)\")",
+      "Bash(DISPLAY=:0 python3 main.py)",
+      "Bash(echo \"launched pid $!\")"
     ]
   }
 }

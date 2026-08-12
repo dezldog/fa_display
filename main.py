@@ -24,23 +24,50 @@ gi.require_version('Gdk', '4.0')
 from gi.repository import Gio, GLib, Gtk, Pango
 from gi.repository import Gdk, GdkPixbuf, GObject
 
-RECEIVER_URL = 'http://flightaware.airwisp.net:8080/data/receiver.json'
-AIRCRAFT_URL = 'http://flightaware.airwisp.net:8080/data/aircraft.json'
+DEFAULT_RECEIVER_HOST = 'flightaware.airwisp.net'
+DEFAULT_RECEIVER_PORT = 8080
 # Chunked ICAO hex -> {registration, type designator} database the receiver serves
 # for its own SkyAware map (see dbloader.js). Files are keyed by hex prefix, with
 # denser prefixes split into their own deeper file listed under a "children" key.
-DB_BASE_URL = 'http://flightaware.airwisp.net:8080/db/'
+# (paths below are joined with the configured receiver host/port at runtime)
+
+CONFIG_DIR_NAME = 'fa_display'
+CONFIG_FILE_NAME = 'settings.json'
+
+DEFAULT_SETTINGS = {
+    'receiver_host': DEFAULT_RECEIVER_HOST,
+    'receiver_port': DEFAULT_RECEIVER_PORT,
+    'location_override_enabled': False,
+    'location_lat': 0.0,
+    'location_lon': 0.0,
+    'show_range_rings': True,
+    'show_trails': False,
+    'show_icon_legend': True,
+    'show_altitude_legend': True,
+    'distance_unit': 'NM',
+    'altitude_unit': 'ft',
+    'max_aircraft_rows': 200,
+}
+
+DISTANCE_UNITS = ['NM', 'km', 'mi']
+DISTANCE_UNIT_METERS = {'NM': 1852.0, 'km': 1000.0, 'mi': 1609.344}
+DISTANCE_RING_VALUES = {
+    'NM': [5, 15, 25, 35, 45],
+    'km': [10, 25, 50, 75, 100],
+    'mi': [5, 15, 25, 35, 45],
+}
+ALTITUDE_UNITS = ['ft', 'm']
 
 # Visible columns (order matters). Update this list to change the table.
 # Trimmed/updated visible columns (removed Message Age, RSSI, Data Source, Photos)
 COLUMNS = [
     'ICAO', 'Ident', 'Flag', 'Tail', 'Type', 'Squawk', 'Alt',
-    'Speed (kt)', 'Dist', 'Heading',
+    'V (kt)', 'Dist', 'Heading',
     'Msgs', 'Lat', 'Lon'
 ]
 
 # Columns that should be right-aligned (numeric-like)
-NUMERIC_COLUMNS = set(['ICAO', 'Alt', 'Dist', 'Speed (kt)', 'Heading', 'Msgs', 'Lat', 'Lon'])
+NUMERIC_COLUMNS = set(['ICAO', 'Alt', 'Dist', 'V (kt)', 'Heading', 'Msgs', 'Lat', 'Lon'])
 
 # Placeholder for missing values (use an em-dash for nicer alignment/appearance)
 PLACEHOLDER = '\u2014'  # em dash
@@ -65,6 +92,11 @@ SPECIAL_SQUAWK_COLORS = {
     '7600': 'rgb(0, 255, 255)',
     '7700': 'rgb(255, 255, 0)',
 }
+
+BANNER_TEXT = 'FlightAware Desktop Display'
+BANNER_BG_RGB = (28 / 255, 31 / 255, 37 / 255)
+BANNER_TEXT_RGB = (0x5A / 255, 0x75 / 255, 0x95 / 255)
+BANNER_BORDER_RGBA = (0x5A / 255, 0x75 / 255, 0x95 / 255, 0.3)
 
 # (label, shape) entries shown in the map legend.
 LEGEND_ENTRIES = [
@@ -97,7 +129,7 @@ COLUMN_TO_ATTR = {
     'Type': 'ac_type',
     'Squawk': 'squawk',
     'Alt': 'altitude',
-    'Speed (kt)': 'speed',
+    'V (kt)': 'speed',
     'Dist': 'distance',
     'Heading': 'heading',
     'Msgs': 'msgs',
@@ -312,7 +344,7 @@ class FlightAwareDisplay(Gtk.Application):
         'Type': 130,
         'Squawk': 60,
         'Alt': 90,
-        'Speed (kt)': 80,
+        'V (kt)': 55,
         'Dist': 90,
         'Heading': 70,
         'Msgs': 60,
@@ -344,11 +376,60 @@ class FlightAwareDisplay(Gtk.Application):
         self.selected_hex = None
         self.aircraft_trails = {}
         self.aircraft_trail_last_seen = {}
-        self.show_trails = False
+        self.settings = self.load_settings()
+        self.apply_receiver_urls()
+        self.show_trails = self.settings['show_trails']
         try:
             os.makedirs(self.tile_cache_dir, exist_ok=True)
         except Exception:
             pass
+
+    def get_settings_path(self):
+        config_dir = os.path.join(GLib.get_user_config_dir(), CONFIG_DIR_NAME)
+        return os.path.join(config_dir, CONFIG_FILE_NAME)
+
+    def load_settings(self):
+        settings = dict(DEFAULT_SETTINGS)
+        try:
+            with open(self.get_settings_path(), 'r') as fh:
+                saved = json.load(fh)
+            if isinstance(saved, dict):
+                settings.update({k: v for k, v in saved.items() if k in DEFAULT_SETTINGS})
+        except (OSError, json.JSONDecodeError):
+            pass
+        return settings
+
+    def save_settings(self):
+        path = self.get_settings_path()
+        try:
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            with open(path, 'w') as fh:
+                json.dump(self.settings, fh, indent=2)
+        except OSError as exc:
+            print(f'Error saving settings: {exc}')
+
+    def apply_receiver_urls(self):
+        base = f"http://{self.settings['receiver_host']}:{self.settings['receiver_port']}"
+        self.receiver_url = f'{base}/data/receiver.json'
+        self.aircraft_url = f'{base}/data/aircraft.json'
+        self.db_base_url = f'{base}/db/'
+
+    def get_receiver_center(self):
+        if self.settings.get('location_override_enabled'):
+            return self.settings.get('location_lat'), self.settings.get('location_lon')
+        return self.receiver.get('lat'), self.receiver.get('lon')
+
+    def apply_settings_changes(self):
+        self.apply_receiver_urls()
+        self.hex_bucket_cache.clear()
+        self.hex_entry_cache.clear()
+        self.hex_entry_pending.clear()
+        self.show_trails = self.settings['show_trails']
+        if hasattr(self, 'trails_button'):
+            self.trails_button.set_active(self.show_trails)
+        self.rebuild_aircraft_list()
+        self.map_area.queue_draw()
+        self.refresh_data()
 
     def do_activate(self):
         if self.window is None:
@@ -358,12 +439,14 @@ class FlightAwareDisplay(Gtk.Application):
 
     def build_ui(self):
         window = Gtk.ApplicationWindow(application=self, title='FlightAware Display')
-        window.set_default_size(1000, 600)
+        window.set_default_size(887, 890)
         window.set_resizable(True)
 
-        header = Gtk.Label(label='FlightAware receiver display', xalign=0)
-        header.set_margin_bottom(6)
-        header.set_hexpand(True)
+        self.banner_area = Gtk.DrawingArea()
+        self.banner_area.set_draw_func(self.on_banner_draw)
+        self.banner_area.set_content_height(44)
+        self.banner_area.set_hexpand(True)
+        self.banner_area.set_margin_bottom(6)
 
         self.map_area = Gtk.DrawingArea()
         self.map_area.set_draw_func(self.on_map_draw)
@@ -397,11 +480,17 @@ class FlightAwareDisplay(Gtk.Application):
         trails_button.set_tooltip_text('Show/hide aircraft flight trails')
         trails_button.set_active(self.show_trails)
         trails_button.connect('toggled', self.on_trails_toggled)
+        self.trails_button = trails_button
+
+        settings_button = Gtk.Button(label='Settings')
+        settings_button.set_tooltip_text('Configure receiver connection, location, overlays, and display preferences')
+        settings_button.connect('clicked', self.on_settings_clicked)
 
         zoom_box.append(minus_button)
         zoom_box.append(plus_button)
         zoom_box.append(reset_button)
         zoom_box.append(trails_button)
+        zoom_box.append(settings_button)
         zoom_box.append(self.zoom_label)
 
         map_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
@@ -503,7 +592,7 @@ class FlightAwareDisplay(Gtk.Application):
         main_box.set_margin_bottom(12)
         main_box.set_margin_start(12)
         main_box.set_margin_end(12)
-        main_box.append(header)
+        main_box.append(self.banner_area)
 
         # Place the table below the map (vertical layout)
         content_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12)
@@ -647,8 +736,8 @@ class FlightAwareDisplay(Gtk.Application):
         return True
 
     def fetch_data(self):
-        receiver = self.fetch_json(RECEIVER_URL)
-        aircraft = self.fetch_json(AIRCRAFT_URL)
+        receiver = self.fetch_json(self.receiver_url)
+        aircraft = self.fetch_json(self.aircraft_url)
         GLib.idle_add(self.update_data, receiver, aircraft)
 
     def fetch_json(self, url):
@@ -681,7 +770,7 @@ class FlightAwareDisplay(Gtk.Application):
     def get_hex_bucket(self, bkey):
         if bkey in self.hex_bucket_cache:
             return self.hex_bucket_cache[bkey]
-        data = self.fetch_json(f'{DB_BASE_URL}{bkey}.json')
+        data = self.fetch_json(f'{self.db_base_url}{bkey}.json')
         bucket = data if isinstance(data, dict) else {}
         self.hex_bucket_cache[bkey] = bucket
         return bucket
@@ -731,7 +820,11 @@ class FlightAwareDisplay(Gtk.Application):
         if not self.receiver:
             return 'Waiting for receiver data...'
         refresh_ms = self.receiver.get('refresh', 1000)
-        center = f"Receiver center: {self.receiver.get('lat', 'n/a'):.5f}, {self.receiver.get('lon', 'n/a'):.5f}"
+        center_lat, center_lon = self.get_receiver_center()
+        if center_lat is not None and center_lon is not None:
+            center = f'Receiver center: {center_lat:.5f}, {center_lon:.5f}'
+        else:
+            center = 'Receiver center: n/a'
         aircraft_count = len(self.aircraft)
         return f'{center} | {aircraft_count} aircraft | polling every {refresh_ms // 1000}s'
 
@@ -744,7 +837,8 @@ class FlightAwareDisplay(Gtk.Application):
         except Exception:
             pass
 
-        for index, item in enumerate(self.aircraft[:200]):
+        max_rows = self.settings.get('max_aircraft_rows', 200)
+        for index, item in enumerate(self.aircraft[:max_rows]):
             # Skip entries with no identifier (don't show anonymous rows)
             ident_raw = item.get('flight') or item.get('ident') or item.get('registration')
             if not ident_raw or str(ident_raw).strip() == '':
@@ -758,7 +852,7 @@ class FlightAwareDisplay(Gtk.Application):
             row.ac_type = self.format_field(item, 'Type')
             row.squawk = self.format_field(item, 'Squawk')
             row.altitude = self.format_field(item, 'Alt')
-            row.speed = self.format_field(item, 'Speed (kt)')
+            row.speed = self.format_field(item, 'V (kt)')
             row.distance = self.format_field(item, 'Dist')
             row.heading = self.format_field(item, 'Heading')
             row.msgs = self.format_field(item, 'Msgs')
@@ -966,11 +1060,13 @@ class FlightAwareDisplay(Gtk.Application):
             if v is None:
                 return PLACEHOLDER
             try:
-                iv = int(float(v))
-                return f"{iv:,} ft"
+                feet = float(v)
             except Exception:
                 return str(v)
-        if key == 'speed (kt)' or key == 'speed' or key == 'gs':
+            if self.settings.get('altitude_unit') == 'm':
+                return f"{feet * 0.3048:,.0f} m"
+            return f"{int(feet):,} ft"
+        if key == 'v (kt)' or key == 'speed' or key == 'gs':
             for k in ('gs', 'speed'):
                 v = item.get(k)
                 if v is not None:
@@ -997,14 +1093,14 @@ class FlightAwareDisplay(Gtk.Application):
         if key in ('distance (nm)', 'distance', 'dist'):
             lat = item.get('lat')
             lon = item.get('lon')
-            center_lat = self.receiver.get('lat')
-            center_lon = self.receiver.get('lon')
+            center_lat, center_lon = self.get_receiver_center()
             if lat is None or lon is None or center_lat is None or center_lon is None:
                 return PLACEHOLDER
             dx, dy = self.latlon_to_meters(lat, lon, center_lat, center_lon)
             meters = math.hypot(dx, dy)
-            nm = meters / 1852.0
-            return f"{nm:.1f} NM"
+            unit = self.settings.get('distance_unit', 'NM')
+            value = meters / DISTANCE_UNIT_METERS.get(unit, 1852.0)
+            return f'{value:.1f} {unit}'
         if key == 'flag':
             code = item.get('country_code') or item.get('country')
             if not code:
@@ -1060,6 +1156,26 @@ class FlightAwareDisplay(Gtk.Application):
                 return prefix_map[prefix]
         return None
 
+    def on_banner_draw(self, area, context, width, height):
+        context.set_source_rgb(*BANNER_BG_RGB)
+        context.rectangle(0, 0, width, height)
+        context.fill()
+
+        context.select_font_face('Sans', 0, 1)  # bold
+        context.set_font_size(18)
+        context.set_source_rgb(*BANNER_TEXT_RGB)
+        extents = context.text_extents(BANNER_TEXT)
+        text_x = 4
+        text_y = height / 2.0 - extents.height / 2.0 - extents.y_bearing
+        context.move_to(text_x, text_y)
+        context.show_text(BANNER_TEXT)
+
+        context.set_source_rgba(*BANNER_BORDER_RGBA)
+        context.set_line_width(1.0)
+        context.move_to(0, height - 0.5)
+        context.line_to(width, height - 0.5)
+        context.stroke()
+
     def on_map_draw(self, area, context, width, height):
         self.map_hit_targets = []
 
@@ -1067,8 +1183,7 @@ class FlightAwareDisplay(Gtk.Application):
         context.rectangle(0, 0, width, height)
         context.fill()
 
-        center_lat = self.receiver.get('lat')
-        center_lon = self.receiver.get('lon')
+        center_lat, center_lon = self.get_receiver_center()
         if center_lat is None or center_lon is None:
             context.set_source_rgb(0, 0, 0)
             context.select_font_face('Sans', 0, 0)
@@ -1116,28 +1231,31 @@ class FlightAwareDisplay(Gtk.Application):
                     context.fill()
 
         resolution = 156543.03392 * math.cos(math.radians(center_lat)) / (2 ** zoom)
-        context.select_font_face('Sans', 0, 0)
-        context.set_font_size(10)
-        for nm in (5, 15, 25, 35, 45):
-            radius_px = (nm * 1852.0) / resolution
-            context.set_source_rgba(0.1, 0.1, 0.1, 0.45)
-            context.set_line_width(1.0)
-            context.arc(width / 2.0, height / 2.0, radius_px, 0, 2 * math.pi)
-            context.stroke()
+        if self.settings.get('show_range_rings', True):
+            context.select_font_face('Sans', 0, 0)
+            context.set_font_size(10)
+            unit = self.settings.get('distance_unit', 'NM')
+            unit_meters = DISTANCE_UNIT_METERS.get(unit, 1852.0)
+            for val in DISTANCE_RING_VALUES.get(unit, DISTANCE_RING_VALUES['NM']):
+                radius_px = (val * unit_meters) / resolution
+                context.set_source_rgba(0.1, 0.1, 0.1, 0.45)
+                context.set_line_width(1.0)
+                context.arc(width / 2.0, height / 2.0, radius_px, 0, 2 * math.pi)
+                context.stroke()
 
-            label = f'{nm} NM'
-            extents = context.text_extents(label)
-            lx = width / 2.0 - extents.width / 2.0
-            ly = height / 2.0 - radius_px - 4
-            if ly < 14:
-                continue
-            pad = 2
-            context.set_source_rgba(1.0, 1.0, 1.0, 0.75)
-            context.rectangle(lx - pad, ly - extents.height - pad, extents.width + 2 * pad, extents.height + 2 * pad)
-            context.fill()
-            context.set_source_rgb(0.15, 0.15, 0.15)
-            context.move_to(lx, ly)
-            context.show_text(label)
+                label = f'{val} {unit}'
+                extents = context.text_extents(label)
+                lx = width / 2.0 - extents.width / 2.0
+                ly = height / 2.0 - radius_px - 4
+                if ly < 14:
+                    continue
+                pad = 2
+                context.set_source_rgba(1.0, 1.0, 1.0, 0.75)
+                context.rectangle(lx - pad, ly - extents.height - pad, extents.width + 2 * pad, extents.height + 2 * pad)
+                context.fill()
+                context.set_source_rgb(0.15, 0.15, 0.15)
+                context.move_to(lx, ly)
+                context.show_text(label)
 
         context.set_source_rgb(0.05, 0.05, 0.05)
         context.arc(width / 2.0, height / 2.0, 6.0, 0, 2 * math.pi)
@@ -1169,8 +1287,10 @@ class FlightAwareDisplay(Gtk.Application):
             if hex_code:
                 self.map_hit_targets.append((px, py, hex_code))
 
-        self.draw_map_legend(context, width, height)
-        self.draw_altitude_legend(context, width, height)
+        if self.settings.get('show_icon_legend', True):
+            self.draw_map_legend(context, width, height)
+        if self.settings.get('show_altitude_legend', True):
+            self.draw_altitude_legend(context, width, height)
 
         status_text = self.build_status_text()
         context.select_font_face('Sans', 0, 0)
@@ -1221,6 +1341,132 @@ class FlightAwareDisplay(Gtk.Application):
     def on_trails_toggled(self, button):
         self.show_trails = button.get_active()
         self.map_area.queue_draw()
+
+    def on_settings_clicked(self, button):
+        dialog = Gtk.Dialog(title='Settings', transient_for=self.window, modal=True)
+        dialog.add_button('Cancel', Gtk.ResponseType.CANCEL)
+        dialog.add_button('Save', Gtk.ResponseType.OK)
+        dialog.set_default_size(440, 520)
+
+        content = dialog.get_content_area()
+        content.set_margin_top(12)
+        content.set_margin_bottom(12)
+        content.set_margin_start(12)
+        content.set_margin_end(12)
+
+        scroller = Gtk.ScrolledWindow()
+        scroller.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
+        scroller.set_vexpand(True)
+        content.append(scroller)
+
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=16)
+        scroller.set_child(box)
+
+        def make_section(title):
+            frame = Gtk.Frame(label=title)
+            grid = Gtk.Grid(row_spacing=8, column_spacing=12)
+            grid.set_margin_top(8)
+            grid.set_margin_bottom(8)
+            grid.set_margin_start(8)
+            grid.set_margin_end(8)
+            frame.set_child(grid)
+            box.append(frame)
+            return grid
+
+        def add_row(grid, row, label_text, widget):
+            label = Gtk.Label(label=label_text, xalign=0)
+            label.set_hexpand(False)
+            widget.set_hexpand(True)
+            grid.attach(label, 0, row, 1, 1)
+            grid.attach(widget, 1, row, 1, 1)
+
+        # --- Receiver connection ---
+        receiver_grid = make_section('Receiver connection')
+        host_entry = Gtk.Entry()
+        host_entry.set_text(self.settings['receiver_host'])
+        add_row(receiver_grid, 0, 'Hostname / IP', host_entry)
+
+        port_adjustment = Gtk.Adjustment(value=self.settings['receiver_port'], lower=1, upper=65535,
+                                          step_increment=1, page_increment=10)
+        port_spin = Gtk.SpinButton(adjustment=port_adjustment, numeric=True)
+        add_row(receiver_grid, 1, 'Port', port_spin)
+
+        # --- Receiver location ---
+        location_grid = make_section('Receiver location')
+        override_switch = Gtk.Switch()
+        override_switch.set_active(self.settings['location_override_enabled'])
+        override_switch.set_halign(Gtk.Align.START)
+        add_row(location_grid, 0, 'Override receiver-reported location', override_switch)
+
+        lat_adjustment = Gtk.Adjustment(value=self.settings['location_lat'], lower=-90, upper=90,
+                                         step_increment=0.001, page_increment=1)
+        lat_spin = Gtk.SpinButton(adjustment=lat_adjustment, digits=5, numeric=True)
+        add_row(location_grid, 1, 'Latitude', lat_spin)
+
+        lon_adjustment = Gtk.Adjustment(value=self.settings['location_lon'], lower=-180, upper=180,
+                                         step_increment=0.001, page_increment=1)
+        lon_spin = Gtk.SpinButton(adjustment=lon_adjustment, digits=5, numeric=True)
+        add_row(location_grid, 2, 'Longitude', lon_spin)
+
+        # --- Map overlays ---
+        overlay_grid = make_section('Map overlays')
+        rings_switch = Gtk.Switch()
+        rings_switch.set_active(self.settings['show_range_rings'])
+        rings_switch.set_halign(Gtk.Align.START)
+        add_row(overlay_grid, 0, 'Range rings', rings_switch)
+
+        trails_switch = Gtk.Switch()
+        trails_switch.set_active(self.show_trails)
+        trails_switch.set_halign(Gtk.Align.START)
+        add_row(overlay_grid, 1, 'Flight trails on startup', trails_switch)
+
+        icon_legend_switch = Gtk.Switch()
+        icon_legend_switch.set_active(self.settings['show_icon_legend'])
+        icon_legend_switch.set_halign(Gtk.Align.START)
+        add_row(overlay_grid, 2, 'Icon legend', icon_legend_switch)
+
+        altitude_legend_switch = Gtk.Switch()
+        altitude_legend_switch.set_active(self.settings['show_altitude_legend'])
+        altitude_legend_switch.set_halign(Gtk.Align.START)
+        add_row(overlay_grid, 3, 'Altitude legend', altitude_legend_switch)
+
+        # --- Display preferences ---
+        display_grid = make_section('Display preferences')
+        distance_list = Gtk.StringList.new(DISTANCE_UNITS)
+        distance_dropdown = Gtk.DropDown(model=distance_list)
+        distance_dropdown.set_selected(DISTANCE_UNITS.index(self.settings['distance_unit']))
+        add_row(display_grid, 0, 'Distance unit', distance_dropdown)
+
+        altitude_list = Gtk.StringList.new(ALTITUDE_UNITS)
+        altitude_dropdown = Gtk.DropDown(model=altitude_list)
+        altitude_dropdown.set_selected(ALTITUDE_UNITS.index(self.settings['altitude_unit']))
+        add_row(display_grid, 1, 'Altitude unit', altitude_dropdown)
+
+        rows_adjustment = Gtk.Adjustment(value=self.settings['max_aircraft_rows'], lower=10, upper=2000,
+                                          step_increment=10, page_increment=100)
+        rows_spin = Gtk.SpinButton(adjustment=rows_adjustment, numeric=True)
+        add_row(display_grid, 2, 'Max aircraft rows', rows_spin)
+
+        def on_response(dlg, response):
+            if response == Gtk.ResponseType.OK:
+                self.settings['receiver_host'] = host_entry.get_text().strip() or DEFAULT_RECEIVER_HOST
+                self.settings['receiver_port'] = int(port_spin.get_value())
+                self.settings['location_override_enabled'] = override_switch.get_active()
+                self.settings['location_lat'] = lat_spin.get_value()
+                self.settings['location_lon'] = lon_spin.get_value()
+                self.settings['show_range_rings'] = rings_switch.get_active()
+                self.settings['show_trails'] = trails_switch.get_active()
+                self.settings['show_icon_legend'] = icon_legend_switch.get_active()
+                self.settings['show_altitude_legend'] = altitude_legend_switch.get_active()
+                self.settings['distance_unit'] = DISTANCE_UNITS[distance_dropdown.get_selected()]
+                self.settings['altitude_unit'] = ALTITUDE_UNITS[altitude_dropdown.get_selected()]
+                self.settings['max_aircraft_rows'] = int(rows_spin.get_value())
+                self.save_settings()
+                self.apply_settings_changes()
+            dlg.destroy()
+
+        dialog.connect('response', on_response)
+        dialog.present()
 
     def update_trails(self):
         now = time.time()
