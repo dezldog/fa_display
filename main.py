@@ -497,7 +497,7 @@ class FlightAwareDisplay(Gtk.Application):
         map_box.append(zoom_box)
         map_box.append(self.map_area)
 
-        map_frame = Gtk.Frame(label='Map')
+        map_frame = Gtk.Frame()
         map_frame.set_child(map_box)
         map_frame.set_vexpand(True)
         map_frame.set_hexpand(True)
@@ -587,8 +587,8 @@ class FlightAwareDisplay(Gtk.Application):
         list_frame.set_child(scroller)
         list_frame.set_vexpand(True)
 
-        main_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12)
-        main_box.set_margin_top(12)
+        main_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+        main_box.set_margin_top(8)
         main_box.set_margin_bottom(12)
         main_box.set_margin_start(12)
         main_box.set_margin_end(12)
