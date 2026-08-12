@@ -41,21 +41,22 @@ DEFAULT_SETTINGS = {
     'location_lat': 0.0,
     'location_lon': 0.0,
     'show_range_rings': True,
+    'range_ring_interval': 5.0,
+    'range_ring_count': 6,
     'show_trails': False,
     'show_icon_legend': True,
     'show_altitude_legend': True,
     'distance_unit': 'NM',
     'altitude_unit': 'ft',
     'max_aircraft_rows': 200,
+    'default_zoom': 8,
 }
+
+MIN_ZOOM = 2
+MAX_ZOOM = 18
 
 DISTANCE_UNITS = ['NM', 'km', 'mi']
 DISTANCE_UNIT_METERS = {'NM': 1852.0, 'km': 1000.0, 'mi': 1609.344}
-DISTANCE_RING_VALUES = {
-    'NM': [5, 15, 25, 35, 45],
-    'km': [10, 25, 50, 75, 100],
-    'mi': [5, 15, 25, 35, 45],
-}
 ALTITUDE_UNITS = ['ft', 'm']
 
 # Visible columns (order matters). Update this list to change the table.
@@ -116,6 +117,11 @@ LEGEND_ENTRIES = [
 TRAIL_MAX_POINTS = 300
 TRAIL_MIN_MOVE_DEG = 0.0002  # ~20m; avoids piling up points while parked
 TRAIL_MAX_AGE_SECONDS = 600  # drop a trail if its aircraft hasn't been seen this long
+
+# How long a table-row/map-marker selection survives its aircraft briefly
+# dropping out of aircraft.json (e.g. a missed poll), so the highlight
+# doesn't flicker away and reappears automatically if it comes back.
+SELECTED_HEX_GRACE_SECONDS = 30
 
 # tiny 1x1 PNG used as fallback when downloads fail
 PLACEHOLDER_PNG_B64 = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR4nGNgYAAAAAMAASsJTYQAAAAASUVORK5CYII='
@@ -366,7 +372,6 @@ class FlightAwareDisplay(Gtk.Application):
         self.refresh_source = None
         self.tile_cache_dir = 'tiles'
         self.pending_tile_downloads = set()
-        self.map_zoom = 8
         self.zoom_label = None
         self.icon_pixbuf_cache = {}
         self.hex_bucket_cache = {}
@@ -374,11 +379,14 @@ class FlightAwareDisplay(Gtk.Application):
         self.hex_entry_pending = set()
         self.map_hit_targets = []
         self.selected_hex = None
+        self.selected_hex_lost_at = None
+        self.selection_sync_suspended = False
         self.aircraft_trails = {}
         self.aircraft_trail_last_seen = {}
         self.settings = self.load_settings()
         self.apply_receiver_urls()
         self.show_trails = self.settings['show_trails']
+        self.map_zoom = self.settings.get('default_zoom', 8)
         try:
             os.makedirs(self.tile_cache_dir, exist_ok=True)
         except Exception:
@@ -427,6 +435,9 @@ class FlightAwareDisplay(Gtk.Application):
         self.show_trails = self.settings['show_trails']
         if hasattr(self, 'trails_button'):
             self.trails_button.set_active(self.show_trails)
+        if hasattr(self, 'reset_zoom_button'):
+            self.reset_zoom_button.set_tooltip_text(
+                f"Reset zoom to default {self.settings.get('default_zoom', 8)}")
         self.rebuild_aircraft_list()
         self.map_area.queue_draw()
         self.refresh_data()
@@ -471,7 +482,8 @@ class FlightAwareDisplay(Gtk.Application):
         reset_button = Gtk.Button(label='Reset')
         minus_button.set_tooltip_text('Zoom out')
         plus_button.set_tooltip_text('Zoom in')
-        reset_button.set_tooltip_text('Reset zoom to default 8')
+        self.reset_zoom_button = reset_button
+        reset_button.set_tooltip_text(f"Reset zoom to default {self.settings.get('default_zoom', 8)}")
         minus_button.connect('clicked', self.on_zoom_button_clicked, -1)
         plus_button.connect('clicked', self.on_zoom_button_clicked, +1)
         reset_button.connect('clicked', self.on_reset_zoom_clicked)
@@ -488,10 +500,10 @@ class FlightAwareDisplay(Gtk.Application):
 
         zoom_box.append(minus_button)
         zoom_box.append(plus_button)
+        zoom_box.append(self.zoom_label)
         zoom_box.append(reset_button)
         zoom_box.append(trails_button)
         zoom_box.append(settings_button)
-        zoom_box.append(self.zoom_label)
 
         map_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
         map_box.append(zoom_box)
@@ -829,42 +841,48 @@ class FlightAwareDisplay(Gtk.Application):
         return f'{center} | {aircraft_count} aircraft | polling every {refresh_ms // 1000}s'
 
     def rebuild_aircraft_list(self):
-        # Rebuild the Gio.ListStore backing the ListView
-        self.list_store.remove_all()
-        # Ensure flags directory exists
+        # Rebuild the Gio.ListStore backing the ListView. Suspend selection
+        # syncing for the remove/re-append below: remove_all() transiently
+        # clears the selection, which would otherwise stomp on selected_hex
+        # before apply_row_selection() gets a chance to restore it.
         try:
-            os.makedirs(FLAGS_DIR, exist_ok=True)
-        except Exception:
-            pass
+            self.selection_sync_suspended = True
+            self.list_store.remove_all()
+            # Ensure flags directory exists
+            try:
+                os.makedirs(FLAGS_DIR, exist_ok=True)
+            except Exception:
+                pass
 
-        max_rows = self.settings.get('max_aircraft_rows', 200)
-        for index, item in enumerate(self.aircraft[:max_rows]):
-            # Skip entries with no identifier (don't show anonymous rows)
-            ident_raw = item.get('flight') or item.get('ident') or item.get('registration')
-            if not ident_raw or str(ident_raw).strip() == '':
-                continue
-            row = AircraftRow()
-            row.icao = self.format_field(item, 'ICAO')
-            row.ident = self.format_field(item, 'Ident')
-            code = self.infer_aircraft_country(item)
-            row.flag_pixbuf = self.get_flag_pixbuf(code)
-            row.registration = self.format_field(item, 'Tail')
-            row.ac_type = self.format_field(item, 'Type')
-            row.squawk = self.format_field(item, 'Squawk')
-            row.altitude = self.format_field(item, 'Alt')
-            row.speed = self.format_field(item, 'V (kt)')
-            row.distance = self.format_field(item, 'Dist')
-            row.heading = self.format_field(item, 'Heading')
-            row.msgs = self.format_field(item, 'Msgs')
-            row.latitude = self.format_field(item, 'Lat')
-            row.longitude = self.format_field(item, 'Lon')
-            self.list_store.append(row)
-        # remember current sort state if any
-        # (we simply keep attributes on self.sort_index and self.sort_asc)
-        if not hasattr(self, 'sort_index'):
-            self.sort_index = None
-            self.sort_asc = True
-
+            max_rows = self.settings.get('max_aircraft_rows', 200)
+            for index, item in enumerate(self.aircraft[:max_rows]):
+                # Skip entries with no identifier (don't show anonymous rows)
+                ident_raw = item.get('flight') or item.get('ident') or item.get('registration')
+                if not ident_raw or str(ident_raw).strip() == '':
+                    continue
+                row = AircraftRow()
+                row.icao = self.format_field(item, 'ICAO')
+                row.ident = self.format_field(item, 'Ident')
+                code = self.infer_aircraft_country(item)
+                row.flag_pixbuf = self.get_flag_pixbuf(code)
+                row.registration = self.format_field(item, 'Tail')
+                row.ac_type = self.format_field(item, 'Type')
+                row.squawk = self.format_field(item, 'Squawk')
+                row.altitude = self.format_field(item, 'Alt')
+                row.speed = self.format_field(item, 'V (kt)')
+                row.distance = self.format_field(item, 'Dist')
+                row.heading = self.format_field(item, 'Heading')
+                row.msgs = self.format_field(item, 'Msgs')
+                row.latitude = self.format_field(item, 'Lat')
+                row.longitude = self.format_field(item, 'Lon')
+                self.list_store.append(row)
+            # remember current sort state if any
+            # (we simply keep attributes on self.sort_index and self.sort_asc)
+            if not hasattr(self, 'sort_index'):
+                self.sort_index = None
+                self.sort_asc = True
+        finally:
+            self.selection_sync_suspended = False
         self.apply_row_selection()
 
     def on_factory_setup(self, factory, list_item):
@@ -966,9 +984,13 @@ class FlightAwareDisplay(Gtk.Application):
 
             items_sorted = sorted(items, key=key_fn, reverse=not self.sort_asc)
             # repopulate list_store
-            self.list_store.remove_all()
-            for it in items_sorted:
-                self.list_store.append(it)
+            try:
+                self.selection_sync_suspended = True
+                self.list_store.remove_all()
+                for it in items_sorted:
+                    self.list_store.append(it)
+            finally:
+                self.selection_sync_suspended = False
             self.apply_row_selection()
         except Exception:
             pass
@@ -1236,14 +1258,18 @@ class FlightAwareDisplay(Gtk.Application):
             context.set_font_size(10)
             unit = self.settings.get('distance_unit', 'NM')
             unit_meters = DISTANCE_UNIT_METERS.get(unit, 1852.0)
-            for val in DISTANCE_RING_VALUES.get(unit, DISTANCE_RING_VALUES['NM']):
+            interval = self.settings.get('range_ring_interval', 5.0)
+            count = int(self.settings.get('range_ring_count', 6))
+            ring_values = [interval * (i + 1) for i in range(max(0, count))]
+            for val in ring_values:
                 radius_px = (val * unit_meters) / resolution
                 context.set_source_rgba(0.1, 0.1, 0.1, 0.45)
                 context.set_line_width(1.0)
                 context.arc(width / 2.0, height / 2.0, radius_px, 0, 2 * math.pi)
                 context.stroke()
 
-                label = f'{val} {unit}'
+                val_text = f'{val:g}'
+                label = f'{val_text} {unit}'
                 extents = context.text_extents(label)
                 lx = width / 2.0 - extents.width / 2.0
                 ly = height / 2.0 - radius_px - 4
@@ -1278,7 +1304,7 @@ class FlightAwareDisplay(Gtk.Application):
             hex_code = str(hex_code).upper() if hex_code else None
             if hex_code and hex_code == self.selected_hex:
                 context.save()
-                context.set_source_rgba(1.0, 0.85, 0.0, 0.9)
+                context.set_source_rgba(0.9, 0.1, 0.1, 0.9)
                 context.set_line_width(2.5)
                 context.arc(px, py, 16.0, 0, 2 * math.pi)
                 context.stroke()
@@ -1308,6 +1334,7 @@ class FlightAwareDisplay(Gtk.Application):
         hex_code = self.find_aircraft_at(x, y)
         if hex_code:
             self.selected_hex = hex_code
+            self.selected_hex_lost_at = None
             self.apply_row_selection()
 
     def find_aircraft_at(self, x, y):
@@ -1322,11 +1349,18 @@ class FlightAwareDisplay(Gtk.Application):
         return best_hex
 
     def on_table_row_selected(self, selection, param):
+        # Rebuilding the list clears/reassigns the selection as a side effect
+        # (remove_all() drops it, then apply_row_selection() picks it back
+        # up); ignore notifications during that window so they don't stomp
+        # on the user's actual selection.
+        if self.selection_sync_suspended:
+            return
         row = selection.get_selected_item()
         hex_code = getattr(row, 'icao', None) if row else None
         if hex_code == self.selected_hex:
             return
         self.selected_hex = hex_code
+        self.selected_hex_lost_at = None
         self.map_area.queue_draw()
 
     def apply_row_selection(self):
@@ -1335,8 +1369,18 @@ class FlightAwareDisplay(Gtk.Application):
         for i in range(self.list_store.get_n_items()):
             row = self.list_store.get_item(i)
             if getattr(row, 'icao', None) == self.selected_hex:
+                self.selected_hex_lost_at = None
                 self.selection.select_item(i, True)
                 return
+        # Aircraft isn't in this poll's rows (dropped out momentarily). Keep
+        # the selection alive for a grace period instead of clearing it
+        # immediately, so it can reappear on its own if the aircraft returns.
+        now = time.time()
+        if self.selected_hex_lost_at is None:
+            self.selected_hex_lost_at = now
+        elif now - self.selected_hex_lost_at > SELECTED_HEX_GRACE_SECONDS:
+            self.selected_hex = None
+            self.selected_hex_lost_at = None
 
     def on_trails_toggled(self, button):
         self.show_trails = button.get_active()
@@ -1415,20 +1459,30 @@ class FlightAwareDisplay(Gtk.Application):
         rings_switch.set_halign(Gtk.Align.START)
         add_row(overlay_grid, 0, 'Range rings', rings_switch)
 
+        ring_interval_adjustment = Gtk.Adjustment(value=self.settings['range_ring_interval'], lower=0.5, upper=500,
+                                                    step_increment=0.5, page_increment=5)
+        ring_interval_spin = Gtk.SpinButton(adjustment=ring_interval_adjustment, digits=1, numeric=True)
+        add_row(overlay_grid, 1, 'Ring interval (in distance unit)', ring_interval_spin)
+
+        ring_count_adjustment = Gtk.Adjustment(value=self.settings['range_ring_count'], lower=0, upper=20,
+                                                 step_increment=1, page_increment=2)
+        ring_count_spin = Gtk.SpinButton(adjustment=ring_count_adjustment, numeric=True)
+        add_row(overlay_grid, 2, 'Ring count', ring_count_spin)
+
         trails_switch = Gtk.Switch()
         trails_switch.set_active(self.show_trails)
         trails_switch.set_halign(Gtk.Align.START)
-        add_row(overlay_grid, 1, 'Flight trails on startup', trails_switch)
+        add_row(overlay_grid, 3, 'Flight trails on startup', trails_switch)
 
         icon_legend_switch = Gtk.Switch()
         icon_legend_switch.set_active(self.settings['show_icon_legend'])
         icon_legend_switch.set_halign(Gtk.Align.START)
-        add_row(overlay_grid, 2, 'Icon legend', icon_legend_switch)
+        add_row(overlay_grid, 4, 'Icon legend', icon_legend_switch)
 
         altitude_legend_switch = Gtk.Switch()
         altitude_legend_switch.set_active(self.settings['show_altitude_legend'])
         altitude_legend_switch.set_halign(Gtk.Align.START)
-        add_row(overlay_grid, 3, 'Altitude legend', altitude_legend_switch)
+        add_row(overlay_grid, 5, 'Altitude legend', altitude_legend_switch)
 
         # --- Display preferences ---
         display_grid = make_section('Display preferences')
@@ -1447,6 +1501,11 @@ class FlightAwareDisplay(Gtk.Application):
         rows_spin = Gtk.SpinButton(adjustment=rows_adjustment, numeric=True)
         add_row(display_grid, 2, 'Max aircraft rows', rows_spin)
 
+        zoom_adjustment = Gtk.Adjustment(value=self.settings['default_zoom'], lower=MIN_ZOOM, upper=MAX_ZOOM,
+                                          step_increment=1, page_increment=2)
+        zoom_spin = Gtk.SpinButton(adjustment=zoom_adjustment, numeric=True)
+        add_row(display_grid, 3, 'Default zoom level', zoom_spin)
+
         def on_response(dlg, response):
             if response == Gtk.ResponseType.OK:
                 self.settings['receiver_host'] = host_entry.get_text().strip() or DEFAULT_RECEIVER_HOST
@@ -1455,12 +1514,15 @@ class FlightAwareDisplay(Gtk.Application):
                 self.settings['location_lat'] = lat_spin.get_value()
                 self.settings['location_lon'] = lon_spin.get_value()
                 self.settings['show_range_rings'] = rings_switch.get_active()
+                self.settings['range_ring_interval'] = ring_interval_spin.get_value()
+                self.settings['range_ring_count'] = int(ring_count_spin.get_value())
                 self.settings['show_trails'] = trails_switch.get_active()
                 self.settings['show_icon_legend'] = icon_legend_switch.get_active()
                 self.settings['show_altitude_legend'] = altitude_legend_switch.get_active()
                 self.settings['distance_unit'] = DISTANCE_UNITS[distance_dropdown.get_selected()]
                 self.settings['altitude_unit'] = ALTITUDE_UNITS[altitude_dropdown.get_selected()]
                 self.settings['max_aircraft_rows'] = int(rows_spin.get_value())
+                self.settings['default_zoom'] = int(zoom_spin.get_value())
                 self.save_settings()
                 self.apply_settings_changes()
             dlg.destroy()
@@ -1759,16 +1821,16 @@ class FlightAwareDisplay(Gtk.Application):
         span_y *= 1.2
         zoom_x = math.log2(width / (span_x * 256.0))
         zoom_y = math.log2(height / (span_y * 256.0))
-        return max(2, min(18, int(math.floor(min(zoom_x, zoom_y)))))
+        return max(MIN_ZOOM, min(MAX_ZOOM, int(math.floor(min(zoom_x, zoom_y)))))
 
     def on_zoom_button_clicked(self, button, delta):
-        base_zoom = self.map_zoom if self.map_zoom is not None else 8
-        self.map_zoom = max(2, min(18, base_zoom + delta))
+        base_zoom = self.map_zoom if self.map_zoom is not None else self.settings.get('default_zoom', 8)
+        self.map_zoom = max(MIN_ZOOM, min(MAX_ZOOM, base_zoom + delta))
         self.zoom_label.set_text(f'Zoom: {self.map_zoom}')
         self.map_area.queue_draw()
 
     def on_reset_zoom_clicked(self, button):
-        self.map_zoom = 8
+        self.map_zoom = self.settings.get('default_zoom', 8)
         self.zoom_label.set_text(f'Zoom: {self.map_zoom}')
         self.map_area.queue_draw()
 
