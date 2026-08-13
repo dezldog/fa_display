@@ -438,6 +438,9 @@ class FlightAwareDisplay(Gtk.Application):
         if hasattr(self, 'reset_zoom_button'):
             self.reset_zoom_button.set_tooltip_text(
                 f"Reset zoom to default {self.settings.get('default_zoom', 8)}")
+        self.map_zoom = self.settings.get('default_zoom', 8)
+        if self.zoom_label is not None:
+            self.zoom_label.set_text(f'Zoom: {self.map_zoom}')
         self.rebuild_aircraft_list()
         self.map_area.queue_draw()
         self.refresh_data()
