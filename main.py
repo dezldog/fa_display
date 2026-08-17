@@ -34,6 +34,21 @@ DEFAULT_RECEIVER_PORT = 8080
 CONFIG_DIR_NAME = 'fa_display'
 CONFIG_FILE_NAME = 'settings.json'
 
+
+def get_data_dir():
+    """Directory holding bundled, read-only assets (flags/, icons/): the
+    script's own directory when run from source, /app/share/fa_display under
+    Flatpak. Never written to at runtime."""
+    return os.path.dirname(os.path.abspath(__file__))
+
+
+def get_cache_dir():
+    """Writable per-user cache dir for anything fetched/generated at
+    runtime (tile cache, flags not already bundled)."""
+    d = os.path.join(GLib.get_user_cache_dir(), CONFIG_DIR_NAME)
+    os.makedirs(d, exist_ok=True)
+    return d
+
 DEFAULT_SETTINGS = {
     'receiver_host': DEFAULT_RECEIVER_HOST,
     'receiver_port': DEFAULT_RECEIVER_PORT,
@@ -73,7 +88,8 @@ NUMERIC_COLUMNS = set(['ICAO', 'Alt', 'Dist', 'V (kt)', 'Heading', 'Msgs', 'Lat'
 # Placeholder for missing values (use an em-dash for nicer alignment/appearance)
 PLACEHOLDER = '\u2014'  # em dash
 
-FLAGS_DIR = 'flags'
+FLAGS_DIR = os.path.join(get_data_dir(), 'flags')  # bundled, read-only
+FLAGS_CACHE_DIR = os.path.join(get_cache_dir(), 'flags')  # downloaded, writable
 
 # Mirrors the local receiver's PiAware SkyAware config.js ColorByAlt scheme so
 # aircraft are colored the same way as http://flightaware.airwisp.net:8080/.
@@ -116,7 +132,9 @@ LEGEND_ENTRIES = [
 # build up history ourselves from each poll, same as the reference site does.
 TRAIL_MAX_POINTS = 300
 TRAIL_MIN_MOVE_DEG = 0.0002  # ~20m; avoids piling up points while parked
-TRAIL_MAX_AGE_SECONDS = 600  # drop a trail if its aircraft hasn't been seen this long
+TRAIL_MAX_AGE_SECONDS = 20  # drop a trail once its aircraft has been missing from
+# aircraft.json this long (landed, went out of range, etc.) - short enough to
+# read as "removed", but long enough to survive a momentary missed poll
 
 # How long a table-row/map-marker selection survives its aircraft briefly
 # dropping out of aircraft.json (e.g. a missed poll), so the highlight
@@ -359,7 +377,7 @@ class FlightAwareDisplay(Gtk.Application):
     }
 
     def __init__(self):
-        super().__init__(application_id='org.fa_display.app')
+        super().__init__(application_id='net.airwisp.FaDisplay')
         self.window = None
         self.receiver = {}
         self.aircraft = []
@@ -370,7 +388,7 @@ class FlightAwareDisplay(Gtk.Application):
         # and starve the live receiver/aircraft.json poll on self.executor.
         self.db_executor = ThreadPoolExecutor(max_workers=3)
         self.refresh_source = None
-        self.tile_cache_dir = 'tiles'
+        self.tile_cache_dir = os.path.join(get_cache_dir(), 'tiles')
         self.pending_tile_downloads = set()
         self.zoom_label = None
         self.icon_pixbuf_cache = {}
@@ -851,9 +869,10 @@ class FlightAwareDisplay(Gtk.Application):
         try:
             self.selection_sync_suspended = True
             self.list_store.remove_all()
-            # Ensure flags directory exists
+            # Ensure the writable flags cache directory exists (FLAGS_DIR
+            # itself is bundled/read-only)
             try:
-                os.makedirs(FLAGS_DIR, exist_ok=True)
+                os.makedirs(FLAGS_CACHE_DIR, exist_ok=True)
             except Exception:
                 pass
 
@@ -1012,8 +1031,13 @@ class FlightAwareDisplay(Gtk.Application):
             return None
         filename = os.path.join(FLAGS_DIR, f"{cc}.png")
         if not os.path.exists(filename):
+            # Not in the bundled read-only set; fall back to the writable
+            # download cache, fetching into it if needed.
+            filename = os.path.join(FLAGS_CACHE_DIR, f"{cc}.png")
+        if not os.path.exists(filename):
             url = f"https://flagcdn.com/w40/{cc}.png"
             try:
+                os.makedirs(FLAGS_CACHE_DIR, exist_ok=True)
                 urllib.request.urlretrieve(url, filename)
             except Exception:
                 try:

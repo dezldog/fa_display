@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=FlightAware Desktop Display
+Comment=Live aircraft map and table for a local FlightAware/PiAware receiver
+Exec=fa_display
+Icon=net.airwisp.FaDisplay
+Terminal=false
+Categories=Utility;Network;
+StartupNotify=true

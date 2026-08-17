@@ -1,0 +1,43 @@
+app-id: net.airwisp.FaDisplay
+runtime: org.gnome.Platform
+runtime-version: '49'
+sdk: org.gnome.Sdk
+command: fa_display
+
+finish-args:
+  - --share=network        # receiver polling, OSM tiles, flagcdn.com
+  - --share=ipc
+  - --socket=wayland
+  - --socket=fallback-x11
+  - --device=dri            # GPU-accelerated GTK rendering
+
+modules:
+  - name: fa_display
+    buildsystem: simple
+    build-commands:
+      - install -Dm755 main.py /app/share/fa_display/main.py
+      - install -Dm644 aircraft_icons.py /app/share/fa_display/aircraft_icons.py
+      - mkdir -p /app/share/fa_display/flags
+      - cp -a flags/. /app/share/fa_display/flags/
+
+      - install -Dm644 net.airwisp.FaDisplay.desktop /app/share/applications/net.airwisp.FaDisplay.desktop
+      - install -Dm644 net.airwisp.FaDisplay.metainfo.xml /app/share/metainfo/net.airwisp.FaDisplay.metainfo.xml
+
+      - install -Dm644 icons/radar-plane-64.png /app/share/icons/hicolor/64x64/apps/net.airwisp.FaDisplay.png
+      - install -Dm644 icons/radar-plane-128.png /app/share/icons/hicolor/128x128/apps/net.airwisp.FaDisplay.png
+      - install -Dm644 icons/radar-plane-128-2x.png /app/share/icons/hicolor/256x256/apps/net.airwisp.FaDisplay.png
+      - install -Dm644 icons/radar-plane-128.svg /app/share/icons/hicolor/scalable/apps/net.airwisp.FaDisplay.svg
+
+      - |
+        install -Dm755 /dev/stdin /app/bin/fa_display <<'EOF'
+        #!/bin/sh
+        exec python3 /app/share/fa_display/main.py "$@"
+        EOF
+    sources:
+      - type: dir
+        path: .
+        skip:
+          - .git
+          - __pycache__
+          - tiles
+          - Screenshot.png
