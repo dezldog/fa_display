@@ -5,6 +5,8 @@ A native GTK4 desktop app that polls a local FlightAware/PiAware receiver's
 table and an OpenStreetMap-tiled map, matching the receiver's own SkyAware
 coloring and iconography.
 
+![Screenshot of the aircraft table and map view](screen.png)
+
 ## Running from source
 
 Requires Python 3 and the GTK4 PyGObject bindings as system packages (not
