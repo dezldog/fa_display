@@ -464,10 +464,51 @@ class FlightAwareDisplay(Gtk.Application):
         self.refresh_data()
 
     def do_activate(self):
+        self.sync_color_scheme_from_portal()
         if self.window is None:
             self.window = self.build_ui()
         self.window.present()
         self.schedule_refresh()
+
+    def sync_color_scheme_from_portal(self):
+        # GTK doesn't reliably auto-follow the OS light/dark preference here:
+        # X11 XSettings hands it a host GTK theme name it can't resolve
+        # (especially under Flatpak, where that theme isn't in the sandbox),
+        # which masks the desktop portal's own color-scheme signal. Ask the
+        # portal directly instead, and keep listening so a live toggle of
+        # the OS theme is picked up without restarting.
+        try:
+            proxy = Gio.DBusProxy.new_for_bus_sync(
+                Gio.BusType.SESSION, Gio.DBusProxyFlags.NONE, None,
+                'org.freedesktop.portal.Desktop', '/org/freedesktop/portal/desktop',
+                'org.freedesktop.portal.Settings', None)
+        except GLib.Error:
+            return
+
+        def apply_scheme(value):
+            settings = Gtk.Settings.get_default()
+            if value == 1:
+                settings.set_property('gtk-application-prefer-dark-theme', True)
+            elif value == 2:
+                settings.set_property('gtk-application-prefer-dark-theme', False)
+
+        try:
+            result = proxy.call_sync(
+                'Read', GLib.Variant('(ss)', ('org.freedesktop.appearance', 'color-scheme')),
+                Gio.DBusCallFlags.NONE, -1, None)
+            apply_scheme(result.unpack()[0])
+        except GLib.Error:
+            pass
+
+        def on_setting_changed(_proxy, _sender, signal, params):
+            if signal != 'SettingChanged':
+                return
+            namespace, key, value = params.unpack()
+            if namespace == 'org.freedesktop.appearance' and key == 'color-scheme':
+                apply_scheme(value)
+
+        proxy.connect('g-signal', on_setting_changed)
+        self._color_scheme_proxy = proxy  # keep alive; drop it and the signal connection dies
 
     def build_ui(self):
         window = Gtk.ApplicationWindow(application=self, title='FlightAware Display')
