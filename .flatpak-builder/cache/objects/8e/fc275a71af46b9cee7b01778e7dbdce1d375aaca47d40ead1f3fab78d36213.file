@@ -1,0 +1,48 @@
+{
+  "id" : "net.airwisp.FaDisplay",
+  "runtime" : "org.gnome.Platform",
+  "runtime-version" : "49",
+  "runtime-commit" : "e51263e53d04900556e2f97ac2b27201f632f604d68d67f50323f9a99389fdb0",
+  "sdk" : "org.gnome.Sdk",
+  "sdk-commit" : "1df084a5492fbcd01f4d9af1084ade350919de069bbc9974d6dfdb04f47ab60f",
+  "command" : "fa_display",
+  "modules" : [
+    {
+      "name" : "fa_display",
+      "buildsystem" : "simple",
+      "sources" : [
+        {
+          "path" : ".",
+          "skip" : [
+            ".git",
+            "__pycache__",
+            "tiles",
+            "Screenshot.png"
+          ],
+          "type" : "dir"
+        }
+      ],
+      "build-commands" : [
+        "install -Dm755 main.py /app/share/fa_display/main.py",
+        "install -Dm644 aircraft_icons.py /app/share/fa_display/aircraft_icons.py",
+        "mkdir -p /app/share/fa_display/flags",
+        "cp -a flags/. /app/share/fa_display/flags/",
+        "install -Dm644 net.airwisp.FaDisplay.desktop /app/share/applications/net.airwisp.FaDisplay.desktop",
+        "install -Dm644 net.airwisp.FaDisplay.metainfo.xml /app/share/metainfo/net.airwisp.FaDisplay.metainfo.xml",
+        "install -Dm644 icons/radar-plane-64.png /app/share/icons/hicolor/64x64/apps/net.airwisp.FaDisplay.png",
+        "install -Dm644 icons/radar-plane-128.png /app/share/icons/hicolor/128x128/apps/net.airwisp.FaDisplay.png",
+        "install -Dm644 icons/radar-plane-128-2x.png /app/share/icons/hicolor/256x256/apps/net.airwisp.FaDisplay.png",
+        "install -Dm644 icons/radar-plane-128.svg /app/share/icons/hicolor/scalable/apps/net.airwisp.FaDisplay.svg",
+        "install -Dm755 /dev/stdin /app/bin/fa_display <<'EOF'\n#!/bin/sh\nexec python3 /app/share/fa_display/main.py \"$@\"\nEOF\n"
+      ]
+    }
+  ],
+  "finish-args" : [
+    "--share=network",
+    "--share=ipc",
+    "--socket=wayland",
+    "--socket=fallback-x11",
+    "--device=dri"
+  ],
+  "source-date-epoch" : 1787010224
+}
