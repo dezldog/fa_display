@@ -1,14 +1,18 @@
 Project: FlightAware Receiver Display
 
 Purpose
-- Build a standalone Linux Mint Cinnamon desktop app for local FlightAware receiver data.
+- Build a standalone desktop app for local FlightAware receiver data.
+  Primary target is Linux Mint Cinnamon; also runs from source on macOS
+  (Homebrew GTK4/PyGObject) with no code differences beyond OS-appropriate
+  dark-mode detection (see "Current implementation").
 - Display live aircraft tracking and receiver status in a native Python GTK UI.
 
 Stack
 - Python 3
 - GTK 4 via PyGObject
 - Local desktop application
-- Packaged as a Flatpak (`net.airwisp.FaDisplay`); see README.md
+- Packaged as a Flatpak (`net.airwisp.FaDisplay`) on Linux; see README.md.
+  macOS has no Flatpak, so it always runs from source there.
 
 Data sources
 - Receiver API endpoints:
@@ -67,8 +71,17 @@ Current implementation
     Persisted as JSON to `$XDG_CONFIG_HOME/fa_display/settings.json`
     (normally `~/.config/fa_display/settings.json`) and applied immediately
     without restarting the app.
+  - Dark/light mode follows the OS appearance setting. On Linux this reads
+    `org.freedesktop.appearance color-scheme` from the xdg-desktop-portal
+    over D-Bus and keeps listening for live toggles. macOS has neither
+    D-Bus nor that portal, so there `sync_color_scheme_from_macos()`
+    instead polls `defaults read -g AppleInterfaceStyle` every 3s and
+    applies it the same way (`gtk-application-prefer-dark-theme`); GTK's
+    macOS backend doesn't push this from the system on its own.
 - Run from source with `python3 main.py` (requires PyGObject/GTK 4 system
-  packages), or install the Flatpak (see "Packaging" below)
+  packages: `python3-gi`/`gir1.2-gtk-4.0` on Linux, `gtk4`/`pygobject3` via
+  Homebrew on macOS), or install the Flatpak on Linux (see "Packaging"
+  below; Flatpak doesn't run on macOS)
 
 Packaging
 - Application ID: `net.airwisp.FaDisplay` (reverse-DNS of the receiver's

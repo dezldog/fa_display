@@ -3,6 +3,8 @@ import cairo
 import colorsys
 import json
 import math
+import subprocess
+import sys
 import threading
 import time
 import urllib.error
@@ -477,6 +479,9 @@ class FlightAwareDisplay(Gtk.Application):
         # which masks the desktop portal's own color-scheme signal. Ask the
         # portal directly instead, and keep listening so a live toggle of
         # the OS theme is picked up without restarting.
+        if sys.platform == 'darwin':
+            self.sync_color_scheme_from_macos()
+            return
         try:
             proxy = Gio.DBusProxy.new_for_bus_sync(
                 Gio.BusType.SESSION, Gio.DBusProxyFlags.NONE, None,
@@ -509,6 +514,30 @@ class FlightAwareDisplay(Gtk.Application):
 
         proxy.connect('g-signal', on_setting_changed)
         self._color_scheme_proxy = proxy  # keep alive; drop it and the signal connection dies
+
+    def sync_color_scheme_from_macos(self):
+        # There's no xdg-desktop-portal on macOS, and GTK's quartz backend
+        # doesn't push "gtk-application-prefer-dark-theme" from the system
+        # appearance on its own, so poll the same `defaults` key macOS apps
+        # use to detect Dark Mode and mirror it into the GTK setting.
+        settings = Gtk.Settings.get_default()
+        state = {'dark': None}
+
+        def check_once():
+            try:
+                result = subprocess.run(
+                    ['defaults', 'read', '-g', 'AppleInterfaceStyle'],
+                    capture_output=True, text=True, timeout=1)
+                is_dark = result.stdout.strip() == 'Dark'
+            except (OSError, subprocess.TimeoutExpired):
+                return True
+            if is_dark != state['dark']:
+                state['dark'] = is_dark
+                settings.set_property('gtk-application-prefer-dark-theme', is_dark)
+            return True
+
+        check_once()
+        GLib.timeout_add_seconds(3, check_once)
 
     def build_ui(self):
         window = Gtk.ApplicationWindow(application=self, title='FlightAware Display')
