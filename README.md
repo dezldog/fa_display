@@ -29,8 +29,22 @@ python3 main.py
 ```
 
 This uses Homebrew's own `python3`, which `pygobject3` builds against; a
-separately installed Python (pyenv, python.org, etc.) generally won't see
-the `gi` module. Dark/light mode follows the macOS appearance setting via a
+separately installed Python (pyenv, python.org, etc.), or even macOS's
+built-in system `python3` at `/usr/bin/python3`, generally won't see the
+`gi` or `cairo` modules and will fail with `ModuleNotFoundError`. Confirm
+Homebrew's `python3` is the one actually being used:
+
+```
+which python3   # should print /opt/homebrew/bin/python3 (Apple Silicon)
+                 # or /usr/local/bin/python3 (Intel)
+```
+
+If it prints `/usr/bin/python3` instead, Homebrew's `shellenv` isn't taking
+effect in your shell. It usually lives in `~/.zprofile`, which only runs for
+login shells; if your terminal opens non-login shells, add the same line to
+`~/.zshrc`. Also try opening a new terminal window or running `hash -r`,
+since an already-open shell can have `python3` cached to the old path.
+Dark/light mode follows the macOS appearance setting via a
 lightweight poll of `defaults read -g AppleInterfaceStyle` (there's no
 `xdg-desktop-portal` on macOS, which is what Linux uses for the same
 purpose).
